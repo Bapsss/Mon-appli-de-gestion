@@ -1,0 +1,831 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
+import { 
+  collection, 
+  query, 
+  where, 
+  onSnapshot, 
+  doc, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  orderBy,
+  limit,
+  getDoc
+} from 'firebase/firestore';
+import { 
+  auth, 
+  db, 
+  loginWithGoogle, 
+  logout, 
+  OperationType, 
+  handleFirestoreError 
+} from './firebase';
+import { UserProfile, Inventory, Sale, AppState } from './types';
+import { 
+  LayoutDashboard, 
+  PlusCircle, 
+  History, 
+  Package, 
+  BarChart3, 
+  LogOut, 
+  AlertTriangle,
+  TrendingUp,
+  TrendingDown,
+  ChevronRight,
+  Plus,
+  Minus,
+  User as UserIcon
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { format, isToday, parseISO, startOfDay, subDays } from 'date-fns';
+import { 
+  BarChart, 
+  Bar, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer, 
+  AreaChart,
+  Area
+} from 'recharts';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+// Utility for tailwind classes
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+// --- Components ---
+
+const Card = ({ children, className, title, subtitle }: { children: React.ReactNode, className?: string, title?: string, subtitle?: string }) => (
+  <div className={cn("bg-white rounded-2xl p-6 shadow-sm border border-black/5", className)}>
+    {(title || subtitle) && (
+      <div className="mb-4">
+        {title && <h3 className="text-lg font-semibold text-zinc-900">{title}</h3>}
+        {subtitle && <p className="text-sm text-zinc-500">{subtitle}</p>}
+      </div>
+    )}
+    {children}
+  </div>
+);
+
+const StatCard = ({ label, value, icon: Icon, color, trend }: { label: string, value: string | number, icon: any, color: string, trend?: { value: string, positive: boolean } }) => (
+  <Card className="flex flex-col justify-between h-full">
+    <div className="flex justify-between items-start">
+      <div className={cn("p-2 rounded-xl", color)}>
+        <Icon className="w-5 h-5 text-white" />
+      </div>
+      {trend && (
+        <div className={cn("flex items-center text-xs font-medium", trend.positive ? "text-emerald-600" : "text-rose-600")}>
+          {trend.positive ? <TrendingUp className="w-3 h-3 mr-1" /> : <TrendingDown className="w-3 h-3 mr-1" />}
+          {trend.value}
+        </div>
+      )}
+    </div>
+    <div className="mt-4">
+      <p className="text-sm font-medium text-zinc-500">{label}</p>
+      <p className="text-2xl font-bold text-zinc-900 mt-1">{value}</p>
+    </div>
+  </Card>
+);
+
+const Button = ({ children, onClick, variant = 'primary', className, disabled, type = 'button' }: { children: React.ReactNode, onClick?: () => void, variant?: 'primary' | 'secondary' | 'danger' | 'ghost', className?: string, disabled?: boolean, type?: 'button' | 'submit' }) => {
+  const variants = {
+    primary: 'bg-zinc-900 text-white hover:bg-zinc-800',
+    secondary: 'bg-white text-zinc-900 border border-zinc-200 hover:bg-zinc-50',
+    danger: 'bg-rose-600 text-white hover:bg-rose-700',
+    ghost: 'bg-transparent text-zinc-600 hover:bg-zinc-100'
+  };
+  
+  return (
+    <button 
+      type={type}
+      onClick={onClick} 
+      disabled={disabled}
+      className={cn(
+        "px-4 py-2 rounded-xl font-medium transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none flex items-center justify-center gap-2",
+        variants[variant],
+        className
+      )}
+    >
+      {children}
+    </button>
+  );
+};
+
+const Input = ({ label, value, onChange, type = 'text', placeholder, error, min }: { label: string, value: any, onChange: (e: React.ChangeEvent<HTMLInputElement>) => void, type?: string, placeholder?: string, error?: string, min?: number }) => (
+  <div className="flex flex-col gap-1.5 w-full">
+    <label className="text-sm font-medium text-zinc-700">{label}</label>
+    <input 
+      type={type}
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      min={min}
+      className={cn(
+        "px-4 py-2.5 rounded-xl border border-zinc-200 bg-white focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all",
+        error && "border-rose-500 focus:ring-rose-500/10 focus:border-rose-500"
+      )}
+    />
+    {error && <p className="text-xs text-rose-500 mt-0.5">{error}</p>}
+  </div>
+);
+
+// --- Main App ---
+
+export default function App() {
+  const [state, setState] = useState<AppState>({
+    profile: null,
+    inventory: null,
+    sales: [],
+    loading: true,
+    authReady: false
+  });
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'new-sale' | 'history' | 'stock' | 'stats'>('dashboard');
+  const [error, setError] = useState<string | null>(null);
+
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        // Ensure user profile exists
+        const userRef = doc(db, 'users', user.uid);
+        try {
+          const userSnap = await getDoc(userRef);
+          if (!userSnap.exists()) {
+            const newProfile: Omit<UserProfile, 'uid'> = {
+              name: user.displayName || 'Utilisateur',
+              email: user.email || '',
+              role: 'user'
+            };
+            await setDoc(userRef, newProfile);
+          }
+          
+          // Ensure inventory exists
+          const invRef = doc(db, 'inventory', user.uid);
+          const invSnap = await getDoc(invRef);
+          if (!invSnap.exists()) {
+            const newInv: Inventory = {
+              userId: user.uid,
+              initialStock: 100,
+              currentStock: 100,
+              lowStockThreshold: 20
+            };
+            await setDoc(invRef, newInv);
+          }
+        } catch (err) {
+          console.error("Error during initial setup:", err);
+          // We don't throw here to allow the app to continue if possible, 
+          // but we log it for debugging.
+        }
+        
+        setState(prev => ({ ...prev, authReady: true, loading: false }));
+      } else {
+        setState({ profile: null, inventory: null, sales: [], loading: false, authReady: true });
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Data Listeners
+  useEffect(() => {
+    if (!auth.currentUser) return;
+
+    const userId = auth.currentUser.uid;
+
+    // Profile listener
+    const unsubProfile = onSnapshot(doc(db, 'users', userId), (snap) => {
+      if (snap.exists()) {
+        setState(prev => ({ ...prev, profile: snap.data() as UserProfile }));
+      }
+    }, (err) => handleFirestoreError(err, OperationType.GET, `users/${userId}`));
+
+    // Inventory listener
+    const unsubInv = onSnapshot(doc(db, 'inventory', userId), (snap) => {
+      if (snap.exists()) {
+        setState(prev => ({ ...prev, inventory: snap.data() as Inventory }));
+      }
+    }, (err) => handleFirestoreError(err, OperationType.GET, `inventory/${userId}`));
+
+    // Sales listener
+    const q = query(collection(db, 'sales'), where('userId', '==', userId), orderBy('date', 'desc'), limit(100));
+    const unsubSales = onSnapshot(q, (snap) => {
+      const sales = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Sale));
+      setState(prev => ({ ...prev, sales }));
+    }, (err) => handleFirestoreError(err, OperationType.GET, 'sales'));
+
+    return () => {
+      unsubProfile();
+      unsubInv();
+      unsubSales();
+    };
+  }, [state.authReady]);
+
+  // Derived Stats
+  const stats = useMemo(() => {
+    const todaySales = state.sales.filter(s => isToday(parseISO(s.date)));
+    const totalBagsSold = state.sales.reduce((acc, s) => acc + s.bagsSold, 0);
+    const totalRevenue = state.sales.reduce((acc, s) => acc + s.total, 0);
+    const todayBagsSold = todaySales.reduce((acc, s) => acc + s.bagsSold, 0);
+    const todayRevenue = todaySales.reduce((acc, s) => acc + s.total, 0);
+    
+    // Average daily sales (last 7 days or all time)
+    const daysWithSales = new Set(state.sales.map(s => format(parseISO(s.date), 'yyyy-MM-dd'))).size;
+    const avgDailySales = daysWithSales > 0 ? totalBagsSold / daysWithSales : 0;
+    
+    // Estimated days left
+    const daysLeft = state.inventory && avgDailySales > 0 
+      ? Math.floor(state.inventory.currentStock / avgDailySales) 
+      : 0;
+
+    return {
+      todayBagsSold,
+      todayRevenue,
+      totalBagsSold,
+      totalRevenue,
+      avgDailySales,
+      daysLeft,
+      stockStatus: state.inventory 
+        ? (state.inventory.currentStock === 0 ? 'épuisé' : (state.inventory.currentStock < state.inventory.lowStockThreshold ? 'faible' : 'ok'))
+        : 'ok'
+    };
+  }, [state.sales, state.inventory]);
+
+  if (!state.authReady || state.loading) {
+    return (
+      <div className="min-h-screen bg-zinc-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-zinc-200 border-t-zinc-900 rounded-full animate-spin" />
+          <p className="text-zinc-500 font-medium animate-pulse">Chargement de Charcoal Manager...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!auth.currentUser) {
+    return (
+      <div className="min-h-screen bg-zinc-50 flex items-center justify-center p-6">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="max-w-md w-full bg-white rounded-3xl p-8 shadow-xl border border-black/5 text-center"
+        >
+          <div className="w-20 h-20 bg-zinc-900 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg rotate-3">
+            <Package className="w-10 h-10 text-white" />
+          </div>
+          <h1 className="text-3xl font-bold text-zinc-900 mb-2">Charcoal Manager</h1>
+          <p className="text-zinc-500 mb-8">Gérez vos ventes de charbon, suivez votre stock et optimisez vos revenus en toute simplicité.</p>
+          <Button onClick={loginWithGoogle} className="w-full py-4 text-lg">
+            Se connecter avec Google
+          </Button>
+          <p className="text-xs text-zinc-400 mt-6">En vous connectant, vous acceptez nos conditions d'utilisation.</p>
+        </motion.div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-50 flex flex-col md:flex-row">
+      {/* Sidebar / Bottom Nav */}
+      <nav className="md:w-64 bg-white border-r border-zinc-200 flex flex-col fixed bottom-0 left-0 right-0 md:relative z-50 h-16 md:h-screen">
+        <div className="hidden md:flex p-6 items-center gap-3 border-b border-zinc-100">
+          <div className="w-10 h-10 bg-zinc-900 rounded-xl flex items-center justify-center shadow-md">
+            <Package className="w-6 h-6 text-white" />
+          </div>
+          <span className="font-bold text-xl tracking-tight">Charcoal</span>
+        </div>
+        
+        <div className="flex-1 flex md:flex-col items-center md:items-stretch justify-around md:justify-start p-2 md:p-4 gap-1 md:gap-2">
+          <NavButton active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={LayoutDashboard} label="Dashboard" />
+          <NavButton active={activeTab === 'new-sale'} onClick={() => setActiveTab('new-sale')} icon={PlusCircle} label="Vendre" />
+          <NavButton active={activeTab === 'history'} onClick={() => setActiveTab('history')} icon={History} label="Historique" />
+          <NavButton active={activeTab === 'stock'} onClick={() => setActiveTab('stock')} icon={Package} label="Stock" />
+          <NavButton active={activeTab === 'stats'} onClick={() => setActiveTab('stats')} icon={BarChart3} label="Stats" />
+        </div>
+
+        <div className="hidden md:flex p-4 border-t border-zinc-100 items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-zinc-100 rounded-full flex items-center justify-center overflow-hidden">
+              {auth.currentUser.photoURL ? (
+                <img src={auth.currentUser.photoURL} alt="User" referrerPolicy="no-referrer" />
+              ) : (
+                <UserIcon className="w-4 h-4 text-zinc-400" />
+              )}
+            </div>
+            <div className="flex flex-col">
+              <span className="text-xs font-semibold text-zinc-900 truncate max-w-[100px]">{state.profile?.name}</span>
+              <span className="text-[10px] text-zinc-500">Vendeur</span>
+            </div>
+          </div>
+          <button onClick={logout} className="p-2 text-zinc-400 hover:text-rose-600 transition-colors">
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
+      </nav>
+
+      {/* Main Content */}
+      <main className="flex-1 p-4 md:p-8 pb-24 md:pb-8 overflow-y-auto max-w-7xl mx-auto w-full">
+        <header className="flex justify-between items-center mb-8">
+          <div>
+            <h2 className="text-2xl font-bold text-zinc-900">
+              {activeTab === 'dashboard' && 'Tableau de bord'}
+              {activeTab === 'new-sale' && 'Nouvelle vente'}
+              {activeTab === 'history' && 'Historique des ventes'}
+              {activeTab === 'stock' && 'Gestion du stock'}
+              {activeTab === 'stats' && 'Statistiques & Prévisions'}
+            </h2>
+            <p className="text-zinc-500 text-sm">{format(new Date(), 'EEEE d MMMM yyyy')}</p>
+          </div>
+          
+          <div className="md:hidden">
+             <button onClick={logout} className="p-2 bg-white border border-zinc-200 rounded-xl text-zinc-400">
+                <LogOut className="w-5 h-5" />
+             </button>
+          </div>
+        </header>
+
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={activeTab}
+            initial={{ opacity: 0, x: 10 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -10 }}
+            transition={{ duration: 0.2 }}
+          >
+            {activeTab === 'dashboard' && <DashboardView stats={stats} inventory={state.inventory} sales={state.sales} />}
+            {activeTab === 'new-sale' && <NewSaleView inventory={state.inventory} onSaleAdded={() => setActiveTab('dashboard')} />}
+            {activeTab === 'history' && <HistoryView sales={state.sales} />}
+            {activeTab === 'stock' && <StockView inventory={state.inventory} />}
+            {activeTab === 'stats' && <StatsView sales={state.sales} stats={stats} />}
+          </motion.div>
+        </AnimatePresence>
+      </main>
+    </div>
+  );
+}
+
+function NavButton({ active, onClick, icon: Icon, label }: { active: boolean, onClick: () => void, icon: any, label: string }) {
+  return (
+    <button 
+      onClick={onClick}
+      className={cn(
+        "flex flex-col md:flex-row items-center gap-1 md:gap-3 px-3 md:px-4 py-2 md:py-3 rounded-xl transition-all w-full",
+        active 
+          ? "bg-zinc-900 text-white shadow-lg md:shadow-none" 
+          : "text-zinc-500 hover:bg-zinc-100"
+      )}
+    >
+      <Icon className={cn("w-5 h-5", active ? "text-white" : "text-zinc-400")} />
+      <span className="text-[10px] md:text-sm font-medium">{label}</span>
+    </button>
+  );
+}
+
+// --- Views ---
+
+function DashboardView({ stats, inventory, sales }: { stats: any, inventory: Inventory | null, sales: Sale[] }) {
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard 
+          label="Stock restant" 
+          value={inventory?.currentStock || 0} 
+          icon={Package} 
+          color={stats.stockStatus === 'épuisé' ? 'bg-rose-500' : (stats.stockStatus === 'faible' ? 'bg-amber-500' : 'bg-emerald-500')} 
+        />
+        <StatCard 
+          label="Ventes aujourd'hui" 
+          value={`${stats.todayBagsSold} sacs`} 
+          icon={TrendingUp} 
+          color="bg-zinc-900" 
+        />
+        <StatCard 
+          label="Revenu aujourd'hui" 
+          value={`${stats.todayRevenue.toLocaleString()} Ar`} 
+          icon={BarChart3} 
+          color="bg-zinc-900" 
+        />
+        <StatCard 
+          label="Rupture estimée" 
+          value={`${stats.daysLeft} jours`} 
+          icon={AlertTriangle} 
+          color="bg-zinc-900" 
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <Card className="lg:col-span-2" title="Évolution des ventes" subtitle="Sacs vendus par jour (7 derniers jours)">
+          <div className="h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={getChartData(sales)}>
+                <defs>
+                  <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#18181b" stopOpacity={0.1}/>
+                    <stop offset="95%" stopColor="#18181b" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f4f4f5" />
+                <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#71717a' }} />
+                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#71717a' }} />
+                <Tooltip 
+                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}
+                  cursor={{ stroke: '#18181b', strokeWidth: 1 }}
+                />
+                <Area type="monotone" dataKey="sacs" stroke="#18181b" strokeWidth={2} fillOpacity={1} fill="url(#colorSales)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+
+        <Card title="Dernières ventes">
+          <div className="space-y-4">
+            {sales.slice(0, 5).length > 0 ? sales.slice(0, 5).map((sale, idx) => (
+              <div key={sale.id || idx} className="flex items-center justify-between p-3 rounded-xl bg-zinc-50 border border-zinc-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center border border-zinc-200">
+                    <span className="text-xs font-bold">{sale.bagsSold}</span>
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-900">{sale.total.toLocaleString()} Ar</p>
+                    <p className="text-[10px] text-zinc-500">{format(parseISO(sale.date), 'HH:mm')}</p>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-zinc-300" />
+              </div>
+            )) : (
+              <div className="text-center py-8">
+                <p className="text-sm text-zinc-400">Aucune vente enregistrée</p>
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function NewSaleView({ inventory, onSaleAdded }: { inventory: Inventory | null, onSaleAdded: () => void }) {
+  const [bags, setBags] = useState<string>('');
+  const [price, setPrice] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const total = (parseInt(bags) || 0) * (parseFloat(price) || 0);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    const bagsNum = parseInt(bags);
+    const priceNum = parseFloat(price);
+
+    if (!bagsNum || bagsNum <= 0) return setError("Nombre de sacs invalide");
+    if (!priceNum || priceNum <= 0) return setError("Prix invalide");
+    if (!inventory || bagsNum > inventory.currentStock) return setError("Stock insuffisant");
+
+    setLoading(true);
+    try {
+      const sale: Sale = {
+        userId: auth.currentUser!.uid,
+        date: new Date().toISOString(),
+        bagsSold: bagsNum,
+        pricePerBag: priceNum,
+        total: bagsNum * priceNum
+      };
+
+      await addDoc(collection(db, 'sales'), sale);
+      await updateDoc(doc(db, 'inventory', auth.currentUser!.uid), {
+        currentStock: inventory.currentStock - bagsNum
+      });
+      
+      onSaleAdded();
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'sales');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="max-w-xl mx-auto">
+      <Card title="Enregistrer une vente" subtitle="Saisissez les détails de la transaction">
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="flex gap-4">
+            <Input 
+              label="Sacs vendus" 
+              type="number" 
+              value={bags} 
+              onChange={(e) => setBags(e.target.value)} 
+              placeholder="Ex: 5"
+              min={1}
+            />
+            <Input 
+              label="Prix par sac (Ar)" 
+              type="number" 
+              value={price} 
+              onChange={(e) => setPrice(e.target.value)} 
+              placeholder="Ex: 25000"
+              min={1}
+            />
+          </div>
+
+          <div className="p-4 rounded-2xl bg-zinc-900 text-white flex justify-between items-center">
+            <span className="text-sm font-medium opacity-70">Total à payer</span>
+            <span className="text-2xl font-bold">{total.toLocaleString()} Ar</span>
+          </div>
+
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-sm flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4" />
+              {error}
+            </div>
+          )}
+
+          <Button type="submit" className="w-full py-4" disabled={loading}>
+            {loading ? 'Enregistrement...' : 'Confirmer la vente'}
+          </Button>
+        </form>
+      </Card>
+      
+      {inventory && (
+        <div className="mt-6 p-4 rounded-2xl bg-white border border-zinc-200 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Package className="w-5 h-5 text-zinc-400" />
+            <span className="text-sm font-medium text-zinc-600">Stock disponible</span>
+          </div>
+          <span className={cn("font-bold", inventory.currentStock < 20 ? "text-rose-600" : "text-zinc-900")}>
+            {inventory.currentStock} sacs
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HistoryView({ sales }: { sales: Sale[] }) {
+  return (
+    <Card title="Historique complet" subtitle="Liste de toutes vos transactions passées">
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="text-left border-b border-zinc-100">
+              <th className="pb-4 font-semibold text-zinc-500 text-xs uppercase tracking-wider">Date</th>
+              <th className="pb-4 font-semibold text-zinc-500 text-xs uppercase tracking-wider">Sacs</th>
+              <th className="pb-4 font-semibold text-zinc-500 text-xs uppercase tracking-wider">Prix Unitaire</th>
+              <th className="pb-4 font-semibold text-zinc-500 text-xs uppercase tracking-wider text-right">Total</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-50">
+            {sales.map((sale, idx) => (
+              <tr key={sale.id || idx} className="hover:bg-zinc-50 transition-colors">
+                <td className="py-4">
+                  <p className="text-sm font-medium text-zinc-900">{format(parseISO(sale.date), 'dd/MM/yyyy')}</p>
+                  <p className="text-[10px] text-zinc-500">{format(parseISO(sale.date), 'HH:mm')}</p>
+                </td>
+                <td className="py-4">
+                  <span className="px-2 py-1 rounded-md bg-zinc-100 text-zinc-700 text-xs font-bold">{sale.bagsSold}</span>
+                </td>
+                <td className="py-4 text-sm text-zinc-600">{sale.pricePerBag.toLocaleString()} Ar</td>
+                <td className="py-4 text-sm font-bold text-zinc-900 text-right">{sale.total.toLocaleString()} Ar</td>
+              </tr>
+            ))}
+            {sales.length === 0 && (
+              <tr>
+                <td colSpan={4} className="py-12 text-center text-zinc-400 text-sm">Aucune vente trouvée</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function StockView({ inventory }: { inventory: Inventory | null }) {
+  const [newStock, setNewStock] = useState<string>('');
+  const [adjustment, setAdjustment] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+
+  const handleUpdateStock = async () => {
+    const val = parseInt(newStock);
+    if (isNaN(val) || val < 0 || !inventory) return;
+    
+    setLoading(true);
+    try {
+      await updateDoc(doc(db, 'inventory', auth.currentUser!.uid), {
+        initialStock: val,
+        currentStock: val
+      });
+      setNewStock('');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, 'inventory');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAdjustStock = async (type: 'add' | 'remove') => {
+    const val = parseInt(adjustment);
+    if (isNaN(val) || val <= 0 || !inventory) return;
+    
+    const change = type === 'add' ? val : -val;
+    const nextStock = inventory.currentStock + change;
+    
+    if (nextStock < 0) {
+      alert("Le stock ne peut pas être négatif");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await updateDoc(doc(db, 'inventory', auth.currentUser!.uid), {
+        currentStock: nextStock
+      });
+      setAdjustment('');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, 'inventory');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6 max-w-2xl mx-auto">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <Card className="text-center">
+          <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Initial</p>
+          <p className="text-2xl font-bold text-zinc-900">{inventory?.initialStock || 0}</p>
+        </Card>
+        <Card className="text-center">
+          <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Vendu</p>
+          <p className="text-2xl font-bold text-zinc-900">{(inventory?.initialStock || 0) - (inventory?.currentStock || 0)}</p>
+        </Card>
+        <Card className={cn("text-center", inventory?.currentStock && inventory.currentStock < 20 ? "bg-rose-50 border-rose-100" : "")}>
+          <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Restant</p>
+          <p className={cn("text-2xl font-bold", inventory?.currentStock && inventory.currentStock < 20 ? "text-rose-600" : "text-zinc-900")}>
+            {inventory?.currentStock || 0}
+          </p>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <Card title="Réapprovisionnement" subtitle="Réinitialiser le stock total">
+          <div className="flex flex-col gap-4">
+            <Input 
+              label="Nouveau stock total" 
+              type="number" 
+              value={newStock} 
+              onChange={(e) => setNewStock(e.target.value)} 
+              placeholder="Ex: 200"
+            />
+            <Button onClick={handleUpdateStock} disabled={loading || !newStock} className="w-full">
+              Réinitialiser
+            </Button>
+          </div>
+        </Card>
+
+        <Card title="Ajustement manuel" subtitle="Corriger le stock restant">
+          <div className="flex flex-col gap-4">
+            <Input 
+              label="Quantité à ajuster" 
+              type="number" 
+              value={adjustment} 
+              onChange={(e) => setAdjustment(e.target.value)} 
+              placeholder="Ex: 5"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <Button 
+                variant="secondary" 
+                onClick={() => handleAdjustStock('add')} 
+                disabled={loading || !adjustment}
+              >
+                <Plus className="w-4 h-4 mr-1" /> Ajouter
+              </Button>
+              <Button 
+                variant="danger" 
+                onClick={() => handleAdjustStock('remove')} 
+                disabled={loading || !adjustment}
+              >
+                <Minus className="w-4 h-4 mr-1" /> Retirer
+              </Button>
+            </div>
+          </div>
+        </Card>
+      </div>
+
+      {inventory && inventory.currentStock < 20 && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-100 flex items-center gap-4 text-rose-700">
+          <div className="p-2 bg-rose-100 rounded-xl">
+            <AlertTriangle className="w-6 h-6" />
+          </div>
+          <div>
+            <p className="font-bold">Alerte Stock Faible</p>
+            <p className="text-sm opacity-80">Il vous reste moins de {inventory.lowStockThreshold} sacs. Pensez à vous réapprovisionner rapidement.</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatsView({ sales, stats }: { sales: Sale[], stats: any }) {
+  const chartData = useMemo(() => {
+    const last7Days = Array.from({ length: 7 }, (_, i) => {
+      const d = subDays(new Date(), i);
+      return format(d, 'yyyy-MM-dd');
+    }).reverse();
+
+    return last7Days.map(date => {
+      const daySales = sales.filter(s => format(parseISO(s.date), 'yyyy-MM-dd') === date);
+      return {
+        date: format(parseISO(date), 'dd/MM'),
+        sacs: daySales.reduce((acc, s) => acc + s.bagsSold, 0),
+        revenu: daySales.reduce((acc, s) => acc + s.total, 0)
+      };
+    });
+  }, [sales]);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <Card className="bg-zinc-900 text-white">
+          <p className="text-xs font-medium opacity-60 uppercase tracking-wider">Moyenne journalière</p>
+          <p className="text-3xl font-bold mt-1">{stats.avgDailySales.toFixed(1)} sacs</p>
+        </Card>
+        <Card>
+          <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Revenu Total</p>
+          <p className="text-3xl font-bold text-zinc-900 mt-1">{stats.totalRevenue.toLocaleString()} Ar</p>
+        </Card>
+        <Card>
+          <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Sacs Totaux Vendus</p>
+          <p className="text-3xl font-bold text-zinc-900 mt-1">{stats.totalBagsSold} sacs</p>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card title="Revenu par jour" subtitle="Performance financière sur les 7 derniers jours">
+          <div className="h-[300px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f4f4f5" />
+                <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#71717a' }} />
+                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#71717a' }} />
+                <Tooltip 
+                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}
+                />
+                <Bar dataKey="revenu" fill="#18181b" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+
+        <Card title="Prévisions de rupture" subtitle="Basé sur votre moyenne de vente actuelle">
+          <div className="flex flex-col items-center justify-center h-full py-8 text-center">
+            <div className="relative w-40 h-40 flex items-center justify-center mb-6">
+              <svg className="w-full h-full -rotate-90">
+                <circle 
+                  cx="80" cy="80" r="70" 
+                  fill="none" stroke="#f4f4f5" strokeWidth="12" 
+                />
+                <circle 
+                  cx="80" cy="80" r="70" 
+                  fill="none" stroke="#18181b" strokeWidth="12" 
+                  strokeDasharray={440}
+                  strokeDashoffset={440 - (Math.min(stats.daysLeft, 30) / 30) * 440}
+                  strokeLinecap="round"
+                />
+              </svg>
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <span className="text-4xl font-bold text-zinc-900">{stats.daysLeft}</span>
+                <span className="text-xs text-zinc-500 font-medium">Jours</span>
+              </div>
+            </div>
+            <p className="text-sm text-zinc-600 max-w-[200px]">
+              Votre stock sera épuisé dans environ <strong>{stats.daysLeft} jours</strong> si vous continuez à vendre <strong>{stats.avgDailySales.toFixed(1)} sacs</strong> par jour.
+            </p>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// --- Helpers ---
+
+function getChartData(sales: Sale[]) {
+  const last7Days = Array.from({ length: 7 }, (_, i) => {
+    const d = subDays(new Date(), i);
+    return format(d, 'yyyy-MM-dd');
+  }).reverse();
+
+  return last7Days.map(date => {
+    const daySales = sales.filter(s => format(parseISO(s.date), 'yyyy-MM-dd') === date);
+    return {
+      date: format(parseISO(date), 'dd/MM'),
+      sacs: daySales.reduce((acc, s) => acc + s.bagsSold, 0)
+    };
+  });
+}

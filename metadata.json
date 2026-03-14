@@ -1,0 +1,5 @@
+{
+  "name": "Charcoal Manager",
+  "description": "Application de gestion de vente de charbon : suivi des ventes, gestion du stock et statistiques en temps réel.",
+  "requestFramePermissions": []
+}
