@@ -16,8 +16,9 @@ import {
 import { 
   auth, 
   db, 
-  loginWithGoogle, 
   logout, 
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
   OperationType, 
   handleFirestoreError 
 } from './firebase';
@@ -35,6 +36,9 @@ import {
   ChevronRight,
   Plus,
   Minus,
+  Mail,
+  Lock,
+  ArrowRight,
   User as UserIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -59,6 +63,115 @@ function cn(...inputs: ClassValue[]) {
 }
 
 // --- Components ---
+
+function AuthView() {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    try {
+      if (isLogin) {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        await createUserWithEmailAndPassword(auth, email, password);
+      }
+    } catch (err: any) {
+      console.error("Auth error:", err);
+      if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
+        setError("Email ou mot de passe incorrect.");
+      } else if (err.code === 'auth/email-already-in-use') {
+        setError("Cet email est déjà utilisé.");
+      } else if (err.code === 'auth/weak-password') {
+        setError("Le mot de passe doit contenir au moins 6 caractères.");
+      } else if (err.code === 'auth/invalid-email') {
+        setError("Format d'email invalide.");
+      } else {
+        setError("Une erreur est survenue lors de l'authentification.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-50 flex items-center justify-center p-6">
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="max-w-md w-full bg-white rounded-3xl p-8 shadow-xl border border-black/5"
+      >
+        <div className="w-16 h-16 bg-zinc-900 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg rotate-3">
+          <Package className="w-8 h-8 text-white" />
+        </div>
+        
+        <h1 className="text-2xl font-bold text-zinc-900 text-center mb-1">Charcoal Manager</h1>
+        <p className="text-zinc-500 text-center mb-8 text-sm">
+          {isLogin ? "Bon retour ! Connectez-vous à votre compte." : "Commencez à gérer votre stock dès aujourd'hui."}
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-zinc-700 flex items-center gap-2">
+              <Mail className="w-4 h-4" /> Email
+            </label>
+            <input 
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="votre@email.com"
+              className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-zinc-700 flex items-center gap-2">
+              <Lock className="w-4 h-4" /> Mot de passe
+            </label>
+            <input 
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all"
+            />
+          </div>
+
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-medium">
+              {error}
+            </div>
+          )}
+
+          <Button type="submit" disabled={loading} className="w-full py-3">
+            {loading ? "Chargement..." : (isLogin ? "Se connecter" : "Créer un compte")}
+          </Button>
+        </form>
+
+        <div className="mt-8 text-center">
+          <button 
+            onClick={() => setIsLogin(!isLogin)}
+            className="text-sm font-medium text-zinc-600 hover:text-zinc-900 transition-colors flex items-center justify-center gap-1 mx-auto"
+          >
+            {isLogin ? "Pas encore de compte ?" : "Déjà un compte ?"}
+            <span className="text-zinc-900 underline decoration-zinc-200 underline-offset-4">
+              {isLogin ? "S'inscrire" : "Se connecter"}
+            </span>
+            <ArrowRight className="w-3 h-3" />
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
 
 const Card = ({ children, className, title, subtitle }: { children: React.ReactNode, className?: string, title?: string, subtitle?: string }) => (
   <div className={cn("bg-white rounded-2xl p-6 shadow-sm border border-black/5", className)}>
@@ -144,7 +257,7 @@ export default function App() {
     loading: true,
     authReady: false
   });
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'new-sale' | 'history' | 'stock' | 'stats'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'new-sale' | 'history' | 'stock' | 'stats' | 'account'>('dashboard');
   const [error, setError] = useState<string | null>(null);
 
   // Auth Listener
@@ -266,25 +379,7 @@ export default function App() {
   }
 
   if (!auth.currentUser) {
-    return (
-      <div className="min-h-screen bg-zinc-50 flex items-center justify-center p-6">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full bg-white rounded-3xl p-8 shadow-xl border border-black/5 text-center"
-        >
-          <div className="w-20 h-20 bg-zinc-900 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg rotate-3">
-            <Package className="w-10 h-10 text-white" />
-          </div>
-          <h1 className="text-3xl font-bold text-zinc-900 mb-2">Charcoal Manager</h1>
-          <p className="text-zinc-500 mb-8">Gérez vos ventes de charbon, suivez votre stock et optimisez vos revenus en toute simplicité.</p>
-          <Button onClick={loginWithGoogle} className="w-full py-4 text-lg">
-            Se connecter avec Google
-          </Button>
-          <p className="text-xs text-zinc-400 mt-6">En vous connectant, vous acceptez nos conditions d'utilisation.</p>
-        </motion.div>
-      </div>
-    );
+    return <AuthView />;
   }
 
   return (
@@ -304,6 +399,7 @@ export default function App() {
           <NavButton active={activeTab === 'history'} onClick={() => setActiveTab('history')} icon={History} label="Historique" />
           <NavButton active={activeTab === 'stock'} onClick={() => setActiveTab('stock')} icon={Package} label="Stock" />
           <NavButton active={activeTab === 'stats'} onClick={() => setActiveTab('stats')} icon={BarChart3} label="Stats" />
+          <NavButton active={activeTab === 'account'} onClick={() => setActiveTab('account')} icon={UserIcon} label="Compte" />
         </div>
 
         <div className="hidden md:flex p-4 border-t border-zinc-100 items-center justify-between">
@@ -336,6 +432,7 @@ export default function App() {
               {activeTab === 'history' && 'Historique des ventes'}
               {activeTab === 'stock' && 'Gestion du stock'}
               {activeTab === 'stats' && 'Statistiques & Prévisions'}
+              {activeTab === 'account' && 'Mon Compte'}
             </h2>
             <p className="text-zinc-500 text-sm">{format(new Date(), 'EEEE d MMMM yyyy')}</p>
           </div>
@@ -360,6 +457,7 @@ export default function App() {
             {activeTab === 'history' && <HistoryView sales={state.sales} />}
             {activeTab === 'stock' && <StockView inventory={state.inventory} />}
             {activeTab === 'stats' && <StatsView sales={state.sales} stats={stats} />}
+            {activeTab === 'account' && <AccountView profile={state.profile} />}
           </motion.div>
         </AnimatePresence>
       </main>
@@ -728,6 +826,44 @@ function StockView({ inventory }: { inventory: Inventory | null }) {
         </div>
       )}
     </div>
+  );
+}
+
+function AccountView({ profile }: { profile: UserProfile | null }) {
+  return (
+    <motion.div 
+      initial={{ opacity: 0, x: 20 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -20 }}
+      className="max-w-md mx-auto"
+    >
+      <Card title="Profil Utilisateur" subtitle="Gérez vos informations et votre session">
+        <div className="flex flex-col items-center py-6 border-b border-zinc-100 mb-6">
+          <div className="w-20 h-20 bg-zinc-100 rounded-full flex items-center justify-center mb-4">
+            <UserIcon className="w-10 h-10 text-zinc-400" />
+          </div>
+          <h3 className="text-xl font-bold text-zinc-900">{profile?.name || 'Utilisateur'}</h3>
+          <p className="text-sm text-zinc-500">{profile?.email}</p>
+        </div>
+
+        <div className="space-y-4">
+          <div className="p-4 rounded-xl bg-zinc-50 border border-zinc-100">
+            <p className="text-xs font-medium text-zinc-500 uppercase mb-1">Rôle</p>
+            <p className="text-sm font-semibold text-zinc-900 capitalize">{profile?.role || 'Vendeur'}</p>
+          </div>
+          
+          <div className="pt-4">
+            <p className="text-sm text-zinc-500 mb-4 text-center">
+              Vous resterez connecté sur cet appareil tant que vous ne cliquez pas sur le bouton ci-dessous.
+            </p>
+            <Button variant="danger" onClick={logout} className="w-full py-3 flex items-center justify-center gap-2">
+              <LogOut className="w-5 h-5" />
+              Se déconnecter
+            </Button>
+          </div>
+        </div>
+      </Card>
+    </motion.div>
   );
 }
 
