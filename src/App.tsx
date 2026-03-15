@@ -1,27 +1,4 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { 
-  collection, 
-  query, 
-  where, 
-  onSnapshot, 
-  doc, 
-  setDoc, 
-  addDoc, 
-  updateDoc, 
-  orderBy,
-  limit,
-  getDoc
-} from 'firebase/firestore';
-import { 
-  auth, 
-  db, 
-  logout, 
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  OperationType, 
-  handleFirestoreError 
-} from './firebase';
 import { UserProfile, Inventory, Sale, AppState } from './types';
 import { 
   LayoutDashboard, 
@@ -62,39 +39,53 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+// --- API Helpers ---
+const api = {
+  get: (url: string) => fetch(url).then(r => r.ok ? r.json() : Promise.reject(r)),
+  post: (url: string, body: any) => fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(r => r.ok ? r.json() : Promise.reject(r)),
+  put: (url: string, body: any) => fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(r => r.ok ? r.json() : Promise.reject(r))
+};
+
 // --- Components ---
 
-function AuthView() {
-  const [isLogin, setIsLogin] = useState(true);
+function AuthView({ onLogin }: { onLogin: (user: UserProfile) => void }) {
+  const [step, setStep] = useState<'email' | 'code'>('email');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSendCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setLoading(true);
-
     try {
-      if (isLogin) {
-        await signInWithEmailAndPassword(auth, email, password);
-      } else {
-        await createUserWithEmailAndPassword(auth, email, password);
-      }
+      await api.post('/api/auth/send-code', { email });
+      setStep('code');
     } catch (err: any) {
-      console.error("Auth error:", err);
-      if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
-        setError("Email ou mot de passe incorrect.");
-      } else if (err.code === 'auth/email-already-in-use') {
-        setError("Cet email est déjà utilisé.");
-      } else if (err.code === 'auth/weak-password') {
-        setError("Le mot de passe doit contenir au moins 6 caractères.");
-      } else if (err.code === 'auth/invalid-email') {
-        setError("Format d'email invalide.");
-      } else {
-        setError("Une erreur est survenue lors de l'authentification.");
-      }
+      setError("Erreur lors de l'envoi du code.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const { user } = await api.post('/api/auth/verify-code', { email, code });
+      onLogin(user);
+    } catch (err: any) {
+      setError("Code invalide ou expiré.");
     } finally {
       setLoading(false);
     }
@@ -113,61 +104,54 @@ function AuthView() {
         
         <h1 className="text-2xl font-bold text-zinc-900 text-center mb-1">Charcoal Manager</h1>
         <p className="text-zinc-500 text-center mb-8 text-sm">
-          {isLogin ? "Bon retour ! Connectez-vous à votre compte." : "Commencez à gérer votre stock dès aujourd'hui."}
+          {step === 'email' ? "Entrez votre email pour recevoir un code de connexion." : `Un code a été envoyé à ${email}`}
         </p>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium text-zinc-700 flex items-center gap-2">
-              <Mail className="w-4 h-4" /> Email
-            </label>
-            <input 
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="votre@email.com"
-              className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium text-zinc-700 flex items-center gap-2">
-              <Lock className="w-4 h-4" /> Mot de passe
-            </label>
-            <input 
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all"
-            />
-          </div>
-
-          {error && (
-            <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-medium">
-              {error}
+        {step === 'email' ? (
+          <form onSubmit={handleSendCode} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-zinc-700 flex items-center gap-2">
+                <Mail className="w-4 h-4" /> Email
+              </label>
+              <input 
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="votre@email.com"
+                className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all"
+              />
             </div>
-          )}
-
-          <Button type="submit" disabled={loading} className="w-full py-3">
-            {loading ? "Chargement..." : (isLogin ? "Se connecter" : "Créer un compte")}
-          </Button>
-        </form>
-
-        <div className="mt-8 text-center">
-          <button 
-            onClick={() => setIsLogin(!isLogin)}
-            className="text-sm font-medium text-zinc-600 hover:text-zinc-900 transition-colors flex items-center justify-center gap-1 mx-auto"
-          >
-            {isLogin ? "Pas encore de compte ?" : "Déjà un compte ?"}
-            <span className="text-zinc-900 underline decoration-zinc-200 underline-offset-4">
-              {isLogin ? "S'inscrire" : "Se connecter"}
-            </span>
-            <ArrowRight className="w-3 h-3" />
-          </button>
-        </div>
+            {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-medium">{error}</div>}
+            <Button type="submit" disabled={loading} className="w-full py-3">
+              {loading ? "Envoi en cours..." : "Recevoir le code"}
+            </Button>
+          </form>
+        ) : (
+          <form onSubmit={handleVerifyCode} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-zinc-700 flex items-center gap-2">
+                <Lock className="w-4 h-4" /> Code de vérification
+              </label>
+              <input 
+                type="text"
+                required
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder="123456"
+                maxLength={6}
+                className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 text-center text-2xl tracking-[0.5em] font-bold focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all"
+              />
+            </div>
+            {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-medium">{error}</div>}
+            <Button type="submit" disabled={loading} className="w-full py-3">
+              {loading ? "Vérification..." : "Se connecter"}
+            </Button>
+            <button type="button" onClick={() => setStep('email')} className="w-full text-sm text-zinc-500 hover:text-zinc-900 transition-colors">
+              Changer d'email
+            </button>
+          </form>
+        )}
       </motion.div>
     </div>
   );
@@ -258,84 +242,40 @@ export default function App() {
     authReady: false
   });
   const [activeTab, setActiveTab] = useState<'dashboard' | 'new-sale' | 'history' | 'stock' | 'stats' | 'account'>('dashboard');
-  const [error, setError] = useState<string | null>(null);
 
-  // Auth Listener
+  const fetchData = async () => {
+    try {
+      const [inventory, sales] = await Promise.all([
+        api.get('/api/inventory'),
+        api.get('/api/sales')
+      ]);
+      setState(prev => ({ ...prev, inventory, sales }));
+    } catch (err) {
+      console.error("Error fetching data:", err);
+    }
+  };
+
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        // Ensure user profile exists
-        const userRef = doc(db, 'users', user.uid);
-        try {
-          const userSnap = await getDoc(userRef);
-          if (!userSnap.exists()) {
-            const newProfile: Omit<UserProfile, 'uid'> = {
-              name: user.displayName || 'Utilisateur',
-              email: user.email || '',
-              role: 'user'
-            };
-            await setDoc(userRef, newProfile);
-          }
-          
-          // Ensure inventory exists
-          const invRef = doc(db, 'inventory', user.uid);
-          const invSnap = await getDoc(invRef);
-          if (!invSnap.exists()) {
-            const newInv: Inventory = {
-              userId: user.uid,
-              initialStock: 100,
-              currentStock: 100,
-              lowStockThreshold: 20
-            };
-            await setDoc(invRef, newInv);
-          }
-        } catch (err) {
-          console.error("Error during initial setup:", err);
-          // We don't throw here to allow the app to continue if possible, 
-          // but we log it for debugging.
+    const checkAuth = async () => {
+      try {
+        const { user } = await api.get('/api/auth/me');
+        if (user) {
+          setState(prev => ({ ...prev, profile: user, authReady: true, loading: false }));
+          fetchData();
+        } else {
+          setState(prev => ({ ...prev, authReady: true, loading: false }));
         }
-        
+      } catch (err) {
         setState(prev => ({ ...prev, authReady: true, loading: false }));
-      } else {
-        setState({ profile: null, inventory: null, sales: [], loading: false, authReady: true });
       }
-    });
-    return () => unsubscribe();
+    };
+    checkAuth();
   }, []);
 
-  // Data Listeners
-  useEffect(() => {
-    if (!auth.currentUser) return;
-
-    const userId = auth.currentUser.uid;
-
-    // Profile listener
-    const unsubProfile = onSnapshot(doc(db, 'users', userId), (snap) => {
-      if (snap.exists()) {
-        setState(prev => ({ ...prev, profile: snap.data() as UserProfile }));
-      }
-    }, (err) => handleFirestoreError(err, OperationType.GET, `users/${userId}`));
-
-    // Inventory listener
-    const unsubInv = onSnapshot(doc(db, 'inventory', userId), (snap) => {
-      if (snap.exists()) {
-        setState(prev => ({ ...prev, inventory: snap.data() as Inventory }));
-      }
-    }, (err) => handleFirestoreError(err, OperationType.GET, `inventory/${userId}`));
-
-    // Sales listener
-    const q = query(collection(db, 'sales'), where('userId', '==', userId), orderBy('date', 'desc'), limit(100));
-    const unsubSales = onSnapshot(q, (snap) => {
-      const sales = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Sale));
-      setState(prev => ({ ...prev, sales }));
-    }, (err) => handleFirestoreError(err, OperationType.GET, 'sales'));
-
-    return () => {
-      unsubProfile();
-      unsubInv();
-      unsubSales();
-    };
-  }, [state.authReady]);
+  const handleLogout = async () => {
+    await api.post('/api/auth/logout', {});
+    setState({ profile: null, inventory: null, sales: [], loading: false, authReady: true });
+  };
 
   // Derived Stats
   const stats = useMemo(() => {
@@ -345,11 +285,9 @@ export default function App() {
     const todayBagsSold = todaySales.reduce((acc, s) => acc + s.bagsSold, 0);
     const todayRevenue = todaySales.reduce((acc, s) => acc + s.total, 0);
     
-    // Average daily sales (last 7 days or all time)
     const daysWithSales = new Set(state.sales.map(s => format(parseISO(s.date), 'yyyy-MM-dd'))).size;
     const avgDailySales = daysWithSales > 0 ? totalBagsSold / daysWithSales : 0;
     
-    // Estimated days left
     const daysLeft = state.inventory && avgDailySales > 0 
       ? Math.floor(state.inventory.currentStock / avgDailySales) 
       : 0;
@@ -378,8 +316,11 @@ export default function App() {
     );
   }
 
-  if (!auth.currentUser) {
-    return <AuthView />;
+  if (!state.profile) {
+    return <AuthView onLogin={(user) => {
+      setState(prev => ({ ...prev, profile: user }));
+      fetchData();
+    }} />;
   }
 
   return (
@@ -405,18 +346,14 @@ export default function App() {
         <div className="hidden md:flex p-4 border-t border-zinc-100 items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-zinc-100 rounded-full flex items-center justify-center overflow-hidden">
-              {auth.currentUser.photoURL ? (
-                <img src={auth.currentUser.photoURL} alt="User" referrerPolicy="no-referrer" />
-              ) : (
-                <UserIcon className="w-4 h-4 text-zinc-400" />
-              )}
+              <UserIcon className="w-4 h-4 text-zinc-400" />
             </div>
             <div className="flex flex-col">
               <span className="text-xs font-semibold text-zinc-900 truncate max-w-[100px]">{state.profile?.name}</span>
               <span className="text-[10px] text-zinc-500">Vendeur</span>
             </div>
           </div>
-          <button onClick={logout} className="p-2 text-zinc-400 hover:text-rose-600 transition-colors">
+          <button onClick={handleLogout} className="p-2 text-zinc-400 hover:text-rose-600 transition-colors">
             <LogOut className="w-4 h-4" />
           </button>
         </div>
@@ -436,9 +373,8 @@ export default function App() {
             </h2>
             <p className="text-zinc-500 text-sm">{format(new Date(), 'EEEE d MMMM yyyy')}</p>
           </div>
-          
           <div className="md:hidden">
-             <button onClick={logout} className="p-2 bg-white border border-zinc-200 rounded-xl text-zinc-400">
+             <button onClick={handleLogout} className="p-2 bg-white border border-zinc-200 rounded-xl text-zinc-400">
                 <LogOut className="w-5 h-5" />
              </button>
           </div>
@@ -453,11 +389,11 @@ export default function App() {
             transition={{ duration: 0.2 }}
           >
             {activeTab === 'dashboard' && <DashboardView stats={stats} inventory={state.inventory} sales={state.sales} />}
-            {activeTab === 'new-sale' && <NewSaleView inventory={state.inventory} onSaleAdded={() => setActiveTab('dashboard')} />}
+            {activeTab === 'new-sale' && <NewSaleView inventory={state.inventory} onSaleAdded={() => { setActiveTab('dashboard'); fetchData(); }} />}
             {activeTab === 'history' && <HistoryView sales={state.sales} />}
-            {activeTab === 'stock' && <StockView inventory={state.inventory} />}
+            {activeTab === 'stock' && <StockView inventory={state.inventory} onUpdate={fetchData} />}
             {activeTab === 'stats' && <StatsView sales={state.sales} stats={stats} />}
-            {activeTab === 'account' && <AccountView profile={state.profile} />}
+            {activeTab === 'account' && <AccountView profile={state.profile} onLogout={handleLogout} />}
           </motion.div>
         </AnimatePresence>
       </main>
@@ -494,24 +430,9 @@ function DashboardView({ stats, inventory, sales }: { stats: any, inventory: Inv
           icon={Package} 
           color={stats.stockStatus === 'épuisé' ? 'bg-rose-500' : (stats.stockStatus === 'faible' ? 'bg-amber-500' : 'bg-emerald-500')} 
         />
-        <StatCard 
-          label="Ventes aujourd'hui" 
-          value={`${stats.todayBagsSold} sacs`} 
-          icon={TrendingUp} 
-          color="bg-zinc-900" 
-        />
-        <StatCard 
-          label="Revenu aujourd'hui" 
-          value={`${stats.todayRevenue.toLocaleString()} Ar`} 
-          icon={BarChart3} 
-          color="bg-zinc-900" 
-        />
-        <StatCard 
-          label="Rupture estimée" 
-          value={`${stats.daysLeft} jours`} 
-          icon={AlertTriangle} 
-          color="bg-zinc-900" 
-        />
+        <StatCard label="Ventes aujourd'hui" value={`${stats.todayBagsSold} sacs`} icon={TrendingUp} color="bg-zinc-900" />
+        <StatCard label="Revenu aujourd'hui" value={`${stats.todayRevenue.toLocaleString()} Ar`} icon={BarChart3} color="bg-zinc-900" />
+        <StatCard label="Rupture estimée" value={`${stats.daysLeft} jours`} icon={AlertTriangle} color="bg-zinc-900" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -528,10 +449,7 @@ function DashboardView({ stats, inventory, sales }: { stats: any, inventory: Inv
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f4f4f5" />
                 <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#71717a' }} />
                 <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#71717a' }} />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}
-                  cursor={{ stroke: '#18181b', strokeWidth: 1 }}
-                />
+                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} cursor={{ stroke: '#18181b', strokeWidth: 1 }} />
                 <Area type="monotone" dataKey="sacs" stroke="#18181b" strokeWidth={2} fillOpacity={1} fill="url(#colorSales)" />
               </AreaChart>
             </ResponsiveContainer>
@@ -576,7 +494,6 @@ function NewSaleView({ inventory, onSaleAdded }: { inventory: Inventory | null, 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-
     const bagsNum = parseInt(bags);
     const priceNum = parseFloat(price);
 
@@ -586,22 +503,15 @@ function NewSaleView({ inventory, onSaleAdded }: { inventory: Inventory | null, 
 
     setLoading(true);
     try {
-      const sale: Sale = {
-        userId: auth.currentUser!.uid,
+      await api.post('/api/sales', {
         date: new Date().toISOString(),
         bagsSold: bagsNum,
         pricePerBag: priceNum,
         total: bagsNum * priceNum
-      };
-
-      await addDoc(collection(db, 'sales'), sale);
-      await updateDoc(doc(db, 'inventory', auth.currentUser!.uid), {
-        currentStock: inventory.currentStock - bagsNum
       });
-      
       onSaleAdded();
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'sales');
+      setError("Erreur lors de l'enregistrement");
     } finally {
       setLoading(false);
     }
@@ -612,51 +522,24 @@ function NewSaleView({ inventory, onSaleAdded }: { inventory: Inventory | null, 
       <Card title="Enregistrer une vente" subtitle="Saisissez les détails de la transaction">
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="flex gap-4">
-            <Input 
-              label="Sacs vendus" 
-              type="number" 
-              value={bags} 
-              onChange={(e) => setBags(e.target.value)} 
-              placeholder="Ex: 5"
-              min={1}
-            />
-            <Input 
-              label="Prix par sac (Ar)" 
-              type="number" 
-              value={price} 
-              onChange={(e) => setPrice(e.target.value)} 
-              placeholder="Ex: 25000"
-              min={1}
-            />
+            <Input label="Sacs vendus" type="number" value={bags} onChange={(e) => setBags(e.target.value)} placeholder="Ex: 5" min={1} />
+            <Input label="Prix par sac (Ar)" type="number" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="Ex: 25000" min={1} />
           </div>
-
           <div className="p-4 rounded-2xl bg-zinc-900 text-white flex justify-between items-center">
             <span className="text-sm font-medium opacity-70">Total à payer</span>
             <span className="text-2xl font-bold">{total.toLocaleString()} Ar</span>
           </div>
-
-          {error && (
-            <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-sm flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4" />
-              {error}
-            </div>
-          )}
-
-          <Button type="submit" className="w-full py-4" disabled={loading}>
-            {loading ? 'Enregistrement...' : 'Confirmer la vente'}
-          </Button>
+          {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-sm flex items-center gap-2"><AlertTriangle className="w-4 h-4" />{error}</div>}
+          <Button type="submit" className="w-full py-4" disabled={loading}>{loading ? 'Enregistrement...' : 'Confirmer la vente'}</Button>
         </form>
       </Card>
-      
       {inventory && (
         <div className="mt-6 p-4 rounded-2xl bg-white border border-zinc-200 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Package className="w-5 h-5 text-zinc-400" />
             <span className="text-sm font-medium text-zinc-600">Stock disponible</span>
           </div>
-          <span className={cn("font-bold", inventory.currentStock < 20 ? "text-rose-600" : "text-zinc-900")}>
-            {inventory.currentStock} sacs
-          </span>
+          <span className={cn("font-bold", inventory.currentStock < 20 ? "text-rose-600" : "text-zinc-900")}>{inventory.currentStock} sacs</span>
         </div>
       )}
     </div>
@@ -683,18 +566,12 @@ function HistoryView({ sales }: { sales: Sale[] }) {
                   <p className="text-sm font-medium text-zinc-900">{format(parseISO(sale.date), 'dd/MM/yyyy')}</p>
                   <p className="text-[10px] text-zinc-500">{format(parseISO(sale.date), 'HH:mm')}</p>
                 </td>
-                <td className="py-4">
-                  <span className="px-2 py-1 rounded-md bg-zinc-100 text-zinc-700 text-xs font-bold">{sale.bagsSold}</span>
-                </td>
+                <td className="py-4"><span className="px-2 py-1 rounded-md bg-zinc-100 text-zinc-700 text-xs font-bold">{sale.bagsSold}</span></td>
                 <td className="py-4 text-sm text-zinc-600">{sale.pricePerBag.toLocaleString()} Ar</td>
                 <td className="py-4 text-sm font-bold text-zinc-900 text-right">{sale.total.toLocaleString()} Ar</td>
               </tr>
             ))}
-            {sales.length === 0 && (
-              <tr>
-                <td colSpan={4} className="py-12 text-center text-zinc-400 text-sm">Aucune vente trouvée</td>
-              </tr>
-            )}
+            {sales.length === 0 && <tr><td colSpan={4} className="py-12 text-center text-zinc-400 text-sm">Aucune vente trouvée</td></tr>}
           </tbody>
         </table>
       </div>
@@ -702,7 +579,7 @@ function HistoryView({ sales }: { sales: Sale[] }) {
   );
 }
 
-function StockView({ inventory }: { inventory: Inventory | null }) {
+function StockView({ inventory, onUpdate }: { inventory: Inventory | null, onUpdate: () => void }) {
   const [newStock, setNewStock] = useState<string>('');
   const [adjustment, setAdjustment] = useState<string>('');
   const [loading, setLoading] = useState(false);
@@ -710,16 +587,13 @@ function StockView({ inventory }: { inventory: Inventory | null }) {
   const handleUpdateStock = async () => {
     const val = parseInt(newStock);
     if (isNaN(val) || val < 0 || !inventory) return;
-    
     setLoading(true);
     try {
-      await updateDoc(doc(db, 'inventory', auth.currentUser!.uid), {
-        initialStock: val,
-        currentStock: val
-      });
+      await api.put('/api/inventory', { initialStock: val, currentStock: val });
       setNewStock('');
+      onUpdate();
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, 'inventory');
+      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -728,23 +602,16 @@ function StockView({ inventory }: { inventory: Inventory | null }) {
   const handleAdjustStock = async (type: 'add' | 'remove') => {
     const val = parseInt(adjustment);
     if (isNaN(val) || val <= 0 || !inventory) return;
-    
     const change = type === 'add' ? val : -val;
     const nextStock = inventory.currentStock + change;
-    
-    if (nextStock < 0) {
-      alert("Le stock ne peut pas être négatif");
-      return;
-    }
-
+    if (nextStock < 0) return alert("Le stock ne peut pas être négatif");
     setLoading(true);
     try {
-      await updateDoc(doc(db, 'inventory', auth.currentUser!.uid), {
-        currentStock: nextStock
-      });
+      await api.put('/api/inventory', { currentStock: nextStock });
       setAdjustment('');
+      onUpdate();
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, 'inventory');
+      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -763,103 +630,47 @@ function StockView({ inventory }: { inventory: Inventory | null }) {
         </Card>
         <Card className={cn("text-center", inventory?.currentStock && inventory.currentStock < 20 ? "bg-rose-50 border-rose-100" : "")}>
           <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">Restant</p>
-          <p className={cn("text-2xl font-bold", inventory?.currentStock && inventory.currentStock < 20 ? "text-rose-600" : "text-zinc-900")}>
-            {inventory?.currentStock || 0}
-          </p>
+          <p className={cn("text-2xl font-bold", inventory?.currentStock && inventory.currentStock < 20 ? "text-rose-600" : "text-zinc-900")}>{inventory?.currentStock || 0}</p>
         </Card>
       </div>
-
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <Card title="Réapprovisionnement" subtitle="Réinitialiser le stock total">
           <div className="flex flex-col gap-4">
-            <Input 
-              label="Nouveau stock total" 
-              type="number" 
-              value={newStock} 
-              onChange={(e) => setNewStock(e.target.value)} 
-              placeholder="Ex: 200"
-            />
-            <Button onClick={handleUpdateStock} disabled={loading || !newStock} className="w-full">
-              Réinitialiser
-            </Button>
+            <Input label="Nouveau stock total" type="number" value={newStock} onChange={(e) => setNewStock(e.target.value)} placeholder="Ex: 200" />
+            <Button onClick={handleUpdateStock} disabled={loading || !newStock} className="w-full">Réinitialiser</Button>
           </div>
         </Card>
-
         <Card title="Ajustement manuel" subtitle="Corriger le stock restant">
           <div className="flex flex-col gap-4">
-            <Input 
-              label="Quantité à ajuster" 
-              type="number" 
-              value={adjustment} 
-              onChange={(e) => setAdjustment(e.target.value)} 
-              placeholder="Ex: 5"
-            />
+            <Input label="Quantité à ajuster" type="number" value={adjustment} onChange={(e) => setAdjustment(e.target.value)} placeholder="Ex: 5" />
             <div className="grid grid-cols-2 gap-2">
-              <Button 
-                variant="secondary" 
-                onClick={() => handleAdjustStock('add')} 
-                disabled={loading || !adjustment}
-              >
-                <Plus className="w-4 h-4 mr-1" /> Ajouter
-              </Button>
-              <Button 
-                variant="danger" 
-                onClick={() => handleAdjustStock('remove')} 
-                disabled={loading || !adjustment}
-              >
-                <Minus className="w-4 h-4 mr-1" /> Retirer
-              </Button>
+              <Button variant="secondary" onClick={() => handleAdjustStock('add')} disabled={loading || !adjustment}><Plus className="w-4 h-4" /> Ajouter</Button>
+              <Button variant="secondary" onClick={() => handleAdjustStock('remove')} disabled={loading || !adjustment}><Minus className="w-4 h-4" /> Retirer</Button>
             </div>
           </div>
         </Card>
       </div>
-
-      {inventory && inventory.currentStock < 20 && (
-        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-100 flex items-center gap-4 text-rose-700">
-          <div className="p-2 bg-rose-100 rounded-xl">
-            <AlertTriangle className="w-6 h-6" />
-          </div>
-          <div>
-            <p className="font-bold">Alerte Stock Faible</p>
-            <p className="text-sm opacity-80">Il vous reste moins de {inventory.lowStockThreshold} sacs. Pensez à vous réapprovisionner rapidement.</p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function AccountView({ profile }: { profile: UserProfile | null }) {
+function AccountView({ profile, onLogout }: { profile: UserProfile | null, onLogout: () => void }) {
   return (
-    <motion.div 
-      initial={{ opacity: 0, x: 20 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: -20 }}
-      className="max-w-md mx-auto"
-    >
+    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="max-w-md mx-auto">
       <Card title="Profil Utilisateur" subtitle="Gérez vos informations et votre session">
         <div className="flex flex-col items-center py-6 border-b border-zinc-100 mb-6">
-          <div className="w-20 h-20 bg-zinc-100 rounded-full flex items-center justify-center mb-4">
-            <UserIcon className="w-10 h-10 text-zinc-400" />
-          </div>
+          <div className="w-20 h-20 bg-zinc-100 rounded-full flex items-center justify-center mb-4"><UserIcon className="w-10 h-10 text-zinc-400" /></div>
           <h3 className="text-xl font-bold text-zinc-900">{profile?.name || 'Utilisateur'}</h3>
           <p className="text-sm text-zinc-500">{profile?.email}</p>
         </div>
-
         <div className="space-y-4">
           <div className="p-4 rounded-xl bg-zinc-50 border border-zinc-100">
             <p className="text-xs font-medium text-zinc-500 uppercase mb-1">Rôle</p>
             <p className="text-sm font-semibold text-zinc-900 capitalize">{profile?.role || 'Vendeur'}</p>
           </div>
-          
           <div className="pt-4">
-            <p className="text-sm text-zinc-500 mb-4 text-center">
-              Vous resterez connecté sur cet appareil tant que vous ne cliquez pas sur le bouton ci-dessous.
-            </p>
-            <Button variant="danger" onClick={logout} className="w-full py-3 flex items-center justify-center gap-2">
-              <LogOut className="w-5 h-5" />
-              Se déconnecter
-            </Button>
+            <p className="text-sm text-zinc-500 mb-4 text-center">Vous resterez connecté sur cet appareil tant que vous ne cliquez pas sur le bouton ci-dessous.</p>
+            <Button variant="danger" onClick={onLogout} className="w-full py-3 flex items-center justify-center gap-2"><LogOut className="w-5 h-5" />Se déconnecter</Button>
           </div>
         </div>
       </Card>
@@ -873,14 +684,9 @@ function StatsView({ sales, stats }: { sales: Sale[], stats: any }) {
       const d = subDays(new Date(), i);
       return format(d, 'yyyy-MM-dd');
     }).reverse();
-
     return last7Days.map(date => {
       const daySales = sales.filter(s => format(parseISO(s.date), 'yyyy-MM-dd') === date);
-      return {
-        date: format(parseISO(date), 'dd/MM'),
-        sacs: daySales.reduce((acc, s) => acc + s.bagsSold, 0),
-        revenu: daySales.reduce((acc, s) => acc + s.total, 0)
-      };
+      return { date: format(parseISO(date), 'dd/MM'), sacs: daySales.reduce((acc, s) => acc + s.bagsSold, 0), revenu: daySales.reduce((acc, s) => acc + s.total, 0) };
     });
   }, [sales]);
 
@@ -891,16 +697,9 @@ function StatsView({ sales, stats }: { sales: Sale[], stats: any }) {
           <p className="text-xs font-medium opacity-60 uppercase tracking-wider">Moyenne journalière</p>
           <p className="text-3xl font-bold mt-1">{stats.avgDailySales.toFixed(1)} sacs</p>
         </Card>
-        <Card>
-          <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Revenu Total</p>
-          <p className="text-3xl font-bold text-zinc-900 mt-1">{stats.totalRevenue.toLocaleString()} Ar</p>
-        </Card>
-        <Card>
-          <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Sacs Totaux Vendus</p>
-          <p className="text-3xl font-bold text-zinc-900 mt-1">{stats.totalBagsSold} sacs</p>
-        </Card>
+        <Card><p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Revenu Total</p><p className="text-3xl font-bold text-zinc-900 mt-1">{stats.totalRevenue.toLocaleString()} Ar</p></Card>
+        <Card><p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Sacs Totaux Vendus</p><p className="text-3xl font-bold text-zinc-900 mt-1">{stats.totalBagsSold} sacs</p></Card>
       </div>
-
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card title="Revenu par jour" subtitle="Performance financière sur les 7 derniers jours">
           <div className="h-[300px]">
@@ -909,39 +708,22 @@ function StatsView({ sales, stats }: { sales: Sale[], stats: any }) {
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f4f4f5" />
                 <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#71717a' }} />
                 <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#71717a' }} />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}
-                />
+                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} />
                 <Bar dataKey="revenu" fill="#18181b" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
         </Card>
-
         <Card title="Prévisions de rupture" subtitle="Basé sur votre moyenne de vente actuelle">
           <div className="flex flex-col items-center justify-center h-full py-8 text-center">
             <div className="relative w-40 h-40 flex items-center justify-center mb-6">
               <svg className="w-full h-full -rotate-90">
-                <circle 
-                  cx="80" cy="80" r="70" 
-                  fill="none" stroke="#f4f4f5" strokeWidth="12" 
-                />
-                <circle 
-                  cx="80" cy="80" r="70" 
-                  fill="none" stroke="#18181b" strokeWidth="12" 
-                  strokeDasharray={440}
-                  strokeDashoffset={440 - (Math.min(stats.daysLeft, 30) / 30) * 440}
-                  strokeLinecap="round"
-                />
+                <circle cx="80" cy="80" r="70" fill="none" stroke="#f4f4f5" strokeWidth="12" />
+                <circle cx="80" cy="80" r="70" fill="none" stroke="#18181b" strokeWidth="12" strokeDasharray={440} strokeDashoffset={440 - (Math.min(stats.daysLeft, 30) / 30) * 440} strokeLinecap="round" />
               </svg>
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className="text-4xl font-bold text-zinc-900">{stats.daysLeft}</span>
-                <span className="text-xs text-zinc-500 font-medium">Jours</span>
-              </div>
+              <div className="absolute inset-0 flex flex-col items-center justify-center"><span className="text-4xl font-bold text-zinc-900">{stats.daysLeft}</span><span className="text-xs text-zinc-500 font-medium">Jours</span></div>
             </div>
-            <p className="text-sm text-zinc-600 max-w-[200px]">
-              Votre stock sera épuisé dans environ <strong>{stats.daysLeft} jours</strong> si vous continuez à vendre <strong>{stats.avgDailySales.toFixed(1)} sacs</strong> par jour.
-            </p>
+            <p className="text-sm text-zinc-600 max-w-[200px]">Votre stock sera épuisé dans environ <strong>{stats.daysLeft} jours</strong> si vous continuez à vendre <strong>{stats.avgDailySales.toFixed(1)} sacs</strong> par jour.</p>
           </div>
         </Card>
       </div>
@@ -950,18 +732,13 @@ function StatsView({ sales, stats }: { sales: Sale[], stats: any }) {
 }
 
 // --- Helpers ---
-
 function getChartData(sales: Sale[]) {
   const last7Days = Array.from({ length: 7 }, (_, i) => {
     const d = subDays(new Date(), i);
     return format(d, 'yyyy-MM-dd');
   }).reverse();
-
   return last7Days.map(date => {
     const daySales = sales.filter(s => format(parseISO(s.date), 'yyyy-MM-dd') === date);
-    return {
-      date: format(parseISO(date), 'dd/MM'),
-      sacs: daySales.reduce((acc, s) => acc + s.bagsSold, 0)
-    };
+    return { date: format(parseISO(date), 'dd/MM'), sacs: daySales.reduce((acc, s) => acc + s.bagsSold, 0) };
   });
 }
