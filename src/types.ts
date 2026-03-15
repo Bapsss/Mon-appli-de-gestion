@@ -4,6 +4,7 @@ export interface UserProfile {
   email: string;
   phone?: string;
   role?: 'admin' | 'user';
+  picture?: string;
 }
 
 export interface Inventory {

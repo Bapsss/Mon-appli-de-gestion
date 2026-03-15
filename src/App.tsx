@@ -13,13 +13,10 @@ import {
   ChevronRight,
   Plus,
   Minus,
-  Mail,
-  Lock,
-  ArrowRight,
   User as UserIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { format, isToday, parseISO, startOfDay, subDays } from 'date-fns';
+import { format, isToday, parseISO, subDays } from 'date-fns';
 import { 
   BarChart, 
   Bar, 
@@ -39,57 +36,45 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-// --- API Helpers ---
-const api = {
-  get: (url: string) => fetch(url).then(r => r.ok ? r.json() : Promise.reject(r)),
-  post: (url: string, body: any) => fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  }).then(r => r.ok ? r.json() : Promise.reject(r)),
-  put: (url: string, body: any) => fetch(url, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  }).then(r => r.ok ? r.json() : Promise.reject(r))
-};
-
 // --- Components ---
 
-function AuthView({ onLogin }: { onLogin: (user: UserProfile) => void }) {
-  const [step, setStep] = useState<'email' | 'code'>('email');
-  const [email, setEmail] = useState('');
-  const [code, setCode] = useState('');
+function AuthView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleSendCode = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleLogin = async () => {
     setError(null);
     setLoading(true);
     try {
-      await api.post('/api/auth/send-code', { email });
-      setStep('code');
+      const response = await fetch('/api/auth/url');
+      const { url } = await response.json();
+      
+      const authWindow = window.open(
+        url,
+        'oauth_popup',
+        'width=600,height=700'
+      );
+
+      if (!authWindow) {
+        setError("Veuillez autoriser les popups pour vous connecter.");
+      }
     } catch (err: any) {
-      setError("Erreur lors de l'envoi du code.");
+      console.error("Login error:", err);
+      setError("Erreur lors de la connexion avec Google.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleVerifyCode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-    try {
-      const { user } = await api.post('/api/auth/verify-code', { email, code });
-      onLogin(user);
-    } catch (err: any) {
-      setError("Code invalide ou expiré.");
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
+        window.location.reload();
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
 
   return (
     <div className="min-h-screen bg-zinc-50 flex items-center justify-center p-6">
@@ -104,54 +89,46 @@ function AuthView({ onLogin }: { onLogin: (user: UserProfile) => void }) {
         
         <h1 className="text-2xl font-bold text-zinc-900 text-center mb-1">Charcoal Manager</h1>
         <p className="text-zinc-500 text-center mb-8 text-sm">
-          {step === 'email' ? "Entrez votre email pour recevoir un code de connexion." : `Un code a été envoyé à ${email}`}
+          Connectez-vous pour gérer votre stock de charbon et vos ventes.
         </p>
 
-        {step === 'email' ? (
-          <form onSubmit={handleSendCode} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium text-zinc-700 flex items-center gap-2">
-                <Mail className="w-4 h-4" /> Email
-              </label>
-              <input 
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="votre@email.com"
-                className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all"
-              />
+        <div className="space-y-4">
+          <Button 
+            onClick={handleLogin} 
+            disabled={loading} 
+            className="w-full py-4 flex items-center justify-center gap-3"
+          >
+            {loading ? (
+              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : (
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
+                <path
+                  fill="currentColor"
+                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                />
+                <path
+                  fill="currentColor"
+                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                />
+                <path
+                  fill="currentColor"
+                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"
+                />
+                <path
+                  fill="currentColor"
+                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                />
+              </svg>
+            )}
+            {loading ? "Connexion..." : "Continuer avec Google"}
+          </Button>
+
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-medium text-center">
+              {error}
             </div>
-            {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-medium">{error}</div>}
-            <Button type="submit" disabled={loading} className="w-full py-3">
-              {loading ? "Envoi en cours..." : "Recevoir le code"}
-            </Button>
-          </form>
-        ) : (
-          <form onSubmit={handleVerifyCode} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium text-zinc-700 flex items-center gap-2">
-                <Lock className="w-4 h-4" /> Code de vérification
-              </label>
-              <input 
-                type="text"
-                required
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder="123456"
-                maxLength={6}
-                className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 text-center text-2xl tracking-[0.5em] font-bold focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-900 transition-all"
-              />
-            </div>
-            {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-medium">{error}</div>}
-            <Button type="submit" disabled={loading} className="w-full py-3">
-              {loading ? "Vérification..." : "Se connecter"}
-            </Button>
-            <button type="button" onClick={() => setStep('email')} className="w-full text-sm text-zinc-500 hover:text-zinc-900 transition-colors">
-              Changer d'email
-            </button>
-          </form>
-        )}
+          )}
+        </div>
       </motion.div>
     </div>
   );
@@ -245,36 +222,39 @@ export default function App() {
 
   const fetchData = async () => {
     try {
-      const [inventory, sales] = await Promise.all([
-        api.get('/api/inventory'),
-        api.get('/api/sales')
+      const [meRes, invRes, salesRes] = await Promise.all([
+        fetch('/api/auth/me'),
+        fetch('/api/inventory'),
+        fetch('/api/sales')
       ]);
-      setState(prev => ({ ...prev, inventory, sales }));
+      
+      const meData = await meRes.json();
+      if (meData.user) {
+        const invData = await invRes.json();
+        const salesData = await salesRes.json();
+        setState({
+          profile: meData.user,
+          inventory: invData,
+          sales: salesData,
+          loading: false,
+          authReady: true
+        });
+      } else {
+        setState(prev => ({ ...prev, loading: false, authReady: true }));
+      }
     } catch (err) {
-      console.error("Error fetching data:", err);
+      console.error("Fetch error:", err);
+      setState(prev => ({ ...prev, loading: false, authReady: true }));
     }
   };
 
   useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const { user } = await api.get('/api/auth/me');
-        if (user) {
-          setState(prev => ({ ...prev, profile: user, authReady: true, loading: false }));
-          fetchData();
-        } else {
-          setState(prev => ({ ...prev, authReady: true, loading: false }));
-        }
-      } catch (err) {
-        setState(prev => ({ ...prev, authReady: true, loading: false }));
-      }
-    };
-    checkAuth();
+    fetchData();
   }, []);
 
   const handleLogout = async () => {
-    await api.post('/api/auth/logout', {});
-    setState({ profile: null, inventory: null, sales: [], loading: false, authReady: true });
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.reload();
   };
 
   // Derived Stats
@@ -317,10 +297,7 @@ export default function App() {
   }
 
   if (!state.profile) {
-    return <AuthView onLogin={(user) => {
-      setState(prev => ({ ...prev, profile: user }));
-      fetchData();
-    }} />;
+    return <AuthView />;
   }
 
   return (
@@ -346,10 +323,14 @@ export default function App() {
         <div className="hidden md:flex p-4 border-t border-zinc-100 items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-zinc-100 rounded-full flex items-center justify-center overflow-hidden">
-              <UserIcon className="w-4 h-4 text-zinc-400" />
+              {state.profile.picture ? (
+                <img src={state.profile.picture} alt="User" referrerPolicy="no-referrer" />
+              ) : (
+                <UserIcon className="w-4 h-4 text-zinc-400" />
+              )}
             </div>
             <div className="flex flex-col">
-              <span className="text-xs font-semibold text-zinc-900 truncate max-w-[100px]">{state.profile?.name}</span>
+              <span className="text-xs font-semibold text-zinc-900 truncate max-w-[100px]">{state.profile.name}</span>
               <span className="text-[10px] text-zinc-500">Vendeur</span>
             </div>
           </div>
@@ -389,7 +370,7 @@ export default function App() {
             transition={{ duration: 0.2 }}
           >
             {activeTab === 'dashboard' && <DashboardView stats={stats} inventory={state.inventory} sales={state.sales} />}
-            {activeTab === 'new-sale' && <NewSaleView inventory={state.inventory} onSaleAdded={() => { setActiveTab('dashboard'); fetchData(); }} />}
+            {activeTab === 'new-sale' && <NewSaleView inventory={state.inventory} onSaleAdded={fetchData} />}
             {activeTab === 'history' && <HistoryView sales={state.sales} />}
             {activeTab === 'stock' && <StockView inventory={state.inventory} onUpdate={fetchData} />}
             {activeTab === 'stats' && <StatsView sales={state.sales} stats={stats} />}
@@ -503,15 +484,20 @@ function NewSaleView({ inventory, onSaleAdded }: { inventory: Inventory | null, 
 
     setLoading(true);
     try {
-      await api.post('/api/sales', {
-        date: new Date().toISOString(),
-        bagsSold: bagsNum,
-        pricePerBag: priceNum,
-        total: bagsNum * priceNum
+      const res = await fetch('/api/sales', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bagsSold: bagsNum, pricePerBag: priceNum, total: bagsNum * priceNum })
       });
-      onSaleAdded();
+      if (res.ok) {
+        onSaleAdded();
+        setBags('');
+        setPrice('');
+      } else {
+        setError("Erreur lors de l'enregistrement");
+      }
     } catch (err) {
-      setError("Erreur lors de l'enregistrement");
+      setError("Erreur réseau");
     } finally {
       setLoading(false);
     }
@@ -589,9 +575,13 @@ function StockView({ inventory, onUpdate }: { inventory: Inventory | null, onUpd
     if (isNaN(val) || val < 0 || !inventory) return;
     setLoading(true);
     try {
-      await api.put('/api/inventory', { initialStock: val, currentStock: val });
-      setNewStock('');
+      await fetch('/api/inventory/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initialStock: val, currentStock: val })
+      });
       onUpdate();
+      setNewStock('');
     } catch (err) {
       console.error(err);
     } finally {
@@ -607,9 +597,13 @@ function StockView({ inventory, onUpdate }: { inventory: Inventory | null, onUpd
     if (nextStock < 0) return alert("Le stock ne peut pas être négatif");
     setLoading(true);
     try {
-      await api.put('/api/inventory', { currentStock: nextStock });
-      setAdjustment('');
+      await fetch('/api/inventory/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentStock: nextStock })
+      });
       onUpdate();
+      setAdjustment('');
     } catch (err) {
       console.error(err);
     } finally {
@@ -659,7 +653,13 @@ function AccountView({ profile, onLogout }: { profile: UserProfile | null, onLog
     <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="max-w-md mx-auto">
       <Card title="Profil Utilisateur" subtitle="Gérez vos informations et votre session">
         <div className="flex flex-col items-center py-6 border-b border-zinc-100 mb-6">
-          <div className="w-20 h-20 bg-zinc-100 rounded-full flex items-center justify-center mb-4"><UserIcon className="w-10 h-10 text-zinc-400" /></div>
+          <div className="w-20 h-20 bg-zinc-100 rounded-full flex items-center justify-center mb-4 overflow-hidden">
+            {profile?.picture ? (
+              <img src={profile.picture} alt="User" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+            ) : (
+              <UserIcon className="w-10 h-10 text-zinc-400" />
+            )}
+          </div>
           <h3 className="text-xl font-bold text-zinc-900">{profile?.name || 'Utilisateur'}</h3>
           <p className="text-sm text-zinc-500">{profile?.email}</p>
         </div>
