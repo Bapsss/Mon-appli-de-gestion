@@ -1,31 +1,66 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
-import { OAuth2Client } from 'google-auth-library';
 import cookieParser from 'cookie-parser';
 import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
+import pg from 'pg';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_FILE = path.join(__dirname, 'db.json');
-
-// Initialize DB
-if (!fs.existsSync(DB_FILE)) {
-  fs.writeFileSync(DB_FILE, JSON.stringify({ users: {}, inventory: {}, sales: [] }));
-}
-
-const readDB = () => JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-const writeDB = (data: any) => fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+const { Pool } = pg;
 
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const REDIRECT_URI = `${process.env.APP_URL || 'http://localhost:3000'}/auth/callback`;
+// Postgres Connection
+const pool = new Pool({
+  connectionString: process.env.POSTGRES_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
 
-const client = new OAuth2Client(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+// Initialize Database
+async function initDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        uid TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        name TEXT,
+        role TEXT DEFAULT 'user'
+      );
+      CREATE TABLE IF NOT EXISTS inventory (
+        user_id TEXT PRIMARY KEY,
+        initial_stock INTEGER DEFAULT 100,
+        current_stock INTEGER DEFAULT 100,
+        low_stock_threshold INTEGER DEFAULT 20
+      );
+      CREATE TABLE IF NOT EXISTS sales (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        date TIMESTAMPTZ DEFAULT NOW(),
+        bags_sold INTEGER,
+        price_per_bag NUMERIC,
+        total NUMERIC
+      );
+    `);
+    
+    // Seed admin user
+    const adminCheck = await pool.query('SELECT * FROM users WHERE username = $1', ['admin']);
+    if (adminCheck.rows.length === 0) {
+      await pool.query(
+        'INSERT INTO users (uid, username, password, name, role) VALUES ($1, $2, $3, $4, $5)',
+        ['admin', 'admin', 'admin123', 'Administrateur', 'admin']
+      );
+    }
+    
+    console.log('Database initialized');
+  } catch (err) {
+    console.error('Database initialization error:', err);
+  }
+}
+
+initDB();
 
 // Auth Middleware
 const authMiddleware = (req: any, res: any, next: any) => {
@@ -33,8 +68,6 @@ const authMiddleware = (req: any, res: any, next: any) => {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   
   try {
-    // In a real app, we'd verify the JWT. For this demo, we'll assume the cookie contains the user info or a valid session ID.
-    // Here we just parse the JSON string we stored in the cookie for simplicity.
     req.user = JSON.parse(token);
     next();
   } catch (e) {
@@ -44,74 +77,70 @@ const authMiddleware = (req: any, res: any, next: any) => {
 
 // --- Auth Routes ---
 
-app.get('/api/auth/url', (req, res) => {
-  const url = client.generateAuthUrl({
-    access_type: 'offline',
-    scope: ['https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/userinfo.email'],
-  });
-  res.json({ url });
-});
+app.post('/api/auth/register', async (req, res) => {
+  const { username, password, name } = req.body;
+  
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Identifiant et mot de passe requis' });
+  }
 
-app.get('/auth/callback', async (req, res) => {
-  const { code } = req.query;
   try {
-    const { tokens } = await client.getToken(code as string);
-    client.setCredentials(tokens);
+    const uid = Date.now().toString();
+    await pool.query(
+      'INSERT INTO users (uid, username, password, name) VALUES ($1, $2, $3, $4)',
+      [uid, username, password, name || username]
+    );
     
-    const ticket = await client.verifyIdToken({
-      idToken: tokens.id_token!,
-      audience: CLIENT_ID,
-    });
-    const payload = ticket.getPayload();
+    const user = { uid, username, name: name || username, role: 'user' };
     
-    if (!payload) throw new Error('No payload');
-
-    const user = {
-      uid: payload.sub,
-      name: payload.name,
-      email: payload.email,
-      picture: payload.picture
-    };
-
-    // Store in DB if new
-    const db = readDB();
-    if (!db.users[user.uid]) {
-      db.users[user.uid] = { ...user, role: 'user' };
-      db.inventory[user.uid] = {
-        userId: user.uid,
-        initialStock: 100,
-        currentStock: 100,
-        lowStockThreshold: 20
-      };
-      writeDB(db);
-    }
-
-    // Set cookie
     res.cookie('auth_token', JSON.stringify(user), {
       httpOnly: true,
       secure: true,
       sameSite: 'none',
-      maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+      maxAge: 30 * 24 * 60 * 60 * 1000
     });
 
-    res.send(`
-      <html>
-        <body>
-          <script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
-              window.close();
-            } else {
-              window.location.href = '/';
-            }
-          </script>
-          <p>Connexion réussie. Cette fenêtre va se fermer.</p>
-        </body>
-      </html>
-    `);
-  } catch (error) {
-    console.error('OAuth Error:', error);
-    res.status(500).send('Authentication failed');
+    res.json({ user });
+  } catch (err: any) {
+    if (err.code === '23505') {
+      res.status(400).json({ error: 'Cet identifiant est déjà utilisé' });
+    } else {
+      res.status(500).json({ error: 'Erreur lors de l\'inscription' });
+    }
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body;
+  
+  try {
+    const result = await pool.query(
+      'SELECT * FROM users WHERE username = $1 AND password = $2',
+      [username, password]
+    );
+
+    if (result.rows.length > 0) {
+      const dbUser = result.rows[0];
+      const user = {
+        uid: dbUser.uid,
+        name: dbUser.name,
+        username: dbUser.username,
+        role: dbUser.role
+      };
+
+      res.cookie('auth_token', JSON.stringify(user), {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: 30 * 24 * 60 * 60 * 1000
+      });
+
+      res.json({ user });
+    } else {
+      res.status(401).json({ error: 'Identifiants invalides' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur lors de la connexion' });
   }
 });
 
@@ -120,8 +149,7 @@ app.get('/api/auth/me', (req, res) => {
   if (!token) return res.json({ user: null });
   try {
     const user = JSON.parse(token);
-    const db = readDB();
-    res.json({ user: db.users[user.uid] || null });
+    res.json({ user });
   } catch (e) {
     res.json({ user: null });
   }
@@ -134,41 +162,104 @@ app.post('/api/auth/logout', (req, res) => {
 
 // --- Data Routes ---
 
-app.get('/api/inventory', authMiddleware, (req: any, res) => {
-  const db = readDB();
-  res.json(db.inventory[req.user.uid] || null);
-});
-
-app.post('/api/inventory/update', authMiddleware, (req: any, res) => {
-  const db = readDB();
-  db.inventory[req.user.uid] = { ...db.inventory[req.user.uid], ...req.body };
-  writeDB(db);
-  res.json(db.inventory[req.user.uid]);
-});
-
-app.get('/api/sales', authMiddleware, (req: any, res) => {
-  const db = readDB();
-  const userSales = db.sales.filter((s: any) => s.userId === req.user.uid);
-  res.json(userSales);
-});
-
-app.post('/api/sales', authMiddleware, (req: any, res) => {
-  const db = readDB();
-  const newSale = {
-    id: Date.now().toString(),
-    userId: req.user.uid,
-    ...req.body,
-    date: new Date().toISOString()
-  };
-  db.sales.push(newSale);
-  
-  // Update inventory
-  if (db.inventory[req.user.uid]) {
-    db.inventory[req.user.uid].currentStock -= newSale.bagsSold;
+app.get('/api/inventory', authMiddleware, async (req: any, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM inventory WHERE user_id = $1', [req.user.uid]);
+    if (result.rows.length === 0) {
+      // Create default inventory for new user
+      const newInv = await pool.query(
+        'INSERT INTO inventory (user_id, initial_stock, current_stock, low_stock_threshold) VALUES ($1, 100, 100, 20) RETURNING *',
+        [req.user.uid]
+      );
+      return res.json({
+        userId: newInv.rows[0].user_id,
+        initialStock: newInv.rows[0].initial_stock,
+        currentStock: newInv.rows[0].current_stock,
+        lowStockThreshold: newInv.rows[0].low_stock_threshold
+      });
+    }
+    const inv = result.rows[0];
+    res.json({
+      userId: inv.user_id,
+      initialStock: inv.initial_stock,
+      currentStock: inv.current_stock,
+      lowStockThreshold: inv.low_stock_threshold
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
   }
-  
-  writeDB(db);
-  res.json(newSale);
+});
+
+app.post('/api/inventory/update', authMiddleware, async (req: any, res) => {
+  const { initialStock, currentStock, lowStockThreshold } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE inventory 
+       SET initial_stock = COALESCE($1, initial_stock), 
+           current_stock = COALESCE($2, current_stock), 
+           low_stock_threshold = COALESCE($3, low_stock_threshold) 
+       WHERE user_id = $4 RETURNING *`,
+      [initialStock, currentStock, lowStockThreshold, req.user.uid]
+    );
+    const inv = result.rows[0];
+    res.json({
+      userId: inv.user_id,
+      initialStock: inv.initial_stock,
+      currentStock: inv.current_stock,
+      lowStockThreshold: inv.low_stock_threshold
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/sales', authMiddleware, async (req: any, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM sales WHERE user_id = $1 ORDER BY date DESC', [req.user.uid]);
+    res.json(result.rows.map(s => ({
+      id: s.id,
+      userId: s.user_id,
+      date: s.date,
+      bagsSold: s.bags_sold,
+      pricePerBag: parseFloat(s.price_per_bag),
+      total: parseFloat(s.total)
+    })));
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/sales', authMiddleware, async (req: any, res) => {
+  const { bagsSold, pricePerBag, total } = req.body;
+  const id = Date.now().toString();
+  try {
+    await pool.query('BEGIN');
+    
+    const saleResult = await pool.query(
+      'INSERT INTO sales (id, user_id, bags_sold, price_per_bag, total) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [id, req.user.uid, bagsSold, pricePerBag, total]
+    );
+    
+    await pool.query(
+      'UPDATE inventory SET current_stock = current_stock - $1 WHERE user_id = $2',
+      [bagsSold, req.user.uid]
+    );
+    
+    await pool.query('COMMIT');
+    
+    const s = saleResult.rows[0];
+    res.json({
+      id: s.id,
+      userId: s.user_id,
+      date: s.date,
+      bagsSold: s.bags_sold,
+      pricePerBag: parseFloat(s.price_per_bag),
+      total: parseFloat(s.total)
+    });
+  } catch (err) {
+    await pool.query('ROLLBACK');
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // --- Vite Integration ---
